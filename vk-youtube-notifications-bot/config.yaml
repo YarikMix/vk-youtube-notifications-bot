@@ -1,0 +1,8 @@
+user:
+  user_token: ""  # Ваш токен
+group:
+  group_id: ""  # id группы
+  group_token: ""  # Токен группы
+youtube:
+  domain: "https://www.googleapis.com/youtube/v3"
+  api_key: ""  # Ваш ключ для доступа к YouTube API
