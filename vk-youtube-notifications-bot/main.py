@@ -12,7 +12,7 @@ from vk_api.utils import get_random_id
 from fuzzywuzzy import fuzz
 import yaml
 
-from functions import console_log
+from functions import write_json, console_log
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -85,10 +85,18 @@ class YouTubeParser(object):
 
 
 class Bot(object):
-    def __init__(self, bot, upload, longpoll):
-        self.bot=bot
-        self.upload=upload
-        self.longpoll = longpoll
+    def auth(self):
+        # Авторизируем бота
+        authorize = vk_api.VkApi(token=config["group"]["group_token"])
+        self.longpoll = VkBotLongPoll(
+            vk=authorize,
+            group_id=config["group"]["group_id"]
+        )
+        self.bot = authorize.get_api()
+
+        # Авторизируем пользователя
+        vk_session = vk_api.VkApi(token=config["user"]["user_token"])
+        self.upload = vk_api.VkUpload(vk_session)
 
     def _upload_video(self, video_url: str, video_title: str):
         response = self.upload.video(
@@ -155,7 +163,7 @@ class Bot(object):
                     with open("chats.json", "w", encoding="utf-8") as data_file:
                         json.dump(data, data_file, indent=2)
 
-        bot.messages.send(
+        self.bot.messages.send(
             chat_id=chat_id,
             message=message,
             random_id=get_random_id()
@@ -192,7 +200,7 @@ class Bot(object):
                 with open("chats.json", "w", encoding="utf-8") as file:
                     json.dump(data, file, indent=2)
 
-        bot.messages.send(
+        self.bot.messages.send(
             chat_id=chat_id,
             message=message,
             random_id=get_random_id()
@@ -215,7 +223,7 @@ class Bot(object):
             for i, channel in enumerate(subscriptions, start=1):
                 message += f"\n{i}. {channel['title']}"
 
-        bot.messages.send(
+        self.bot.messages.send(
             chat_id=chat_id,
             message=message,
             random_id=get_random_id()
@@ -243,13 +251,13 @@ class Bot(object):
         message = f"На канале {channel_title} вышло новое видео!"
         console_log(message)
         console_log(video_title)
-        bot.messages.send(
+        self.bot.messages.send(
             chat_id=chat_id,
             message=message,
             random_id=get_random_id()
         )
 
-        bot.messages.send(
+        self.bot.messages.send(
             chat_id=chat_id,
             message="",
             attachment=self._upload_video(video_url, video_title),
@@ -329,35 +337,17 @@ class Bot(object):
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
                 print(e)
                 console_log("Перезапуск бота")
-            except KeyboardInterrupt:
-                # console_log("Работа бота преостановлена")
-                exit()
 
 
 if __name__ == "__main__":
-    # Авторизируем бота
-    authorize = vk_api.VkApi(token=config["group"]["group_token"])
-    longpoll = VkBotLongPoll(
-        vk=authorize,
-        group_id=config["group"]["group_id"]
-    )
-    bot = authorize.get_api()
-
-    # Авторизируем пользователя
-    vk_session = vk_api.VkApi(token=config["user"]["user_token"])
-    upload = vk_api.VkUpload(vk_session)
-
     # Авторизируемся для работы с YouTube API
     youtube = YouTubeParser(
         domain=config["youtube"]["domain"],
         api_key=config["youtube"]["api_key"]
     )
 
-    vkbot = Bot(
-        bot=bot,
-        upload=upload,
-        longpoll=longpoll
-    )
+    vkbot = Bot()
+    vkbot.auth()
 
     p1 = Thread(target = vkbot.check_chats)
     p1.start()  # Запускаем мониторинг ютуб каналов
