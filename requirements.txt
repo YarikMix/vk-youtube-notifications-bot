@@ -1,0 +1,6 @@
+PyMySQL==1.0.2
+vk_api==11.9.1
+pytz==2020.4
+fuzzywuzzy==0.18.0
+requests==2.22.0
+PyYAML==5.4.1

@@ -1,5 +1,12 @@
+import json
 import pytz
 import datetime
+
+
+def write_json(data):
+    """Печает в файл data.json переданные данные"""
+    with open("data.json", "w", encoding="utf-8") as file:
+        json.dump(data, file, indent=2, ensure_ascii=False)
 
 
 def get_time():
@@ -9,6 +16,13 @@ def get_time():
     """
     return datetime.datetime.strftime(datetime.datetime.now(pytz.timezone("Europe/Moscow")), "%d.%m.%Y %H:%M:%S")
 
+
 def console_log(text):
     """Bывод текста в консоль со временем"""
     print("[{}] {}".format(get_time(), text))
+
+
+def get_next(arr, current):
+    """Вовращает следующий элемент списка"""
+    i = arr.index(current)
+    return arr[(i + 1) % len(arr)]

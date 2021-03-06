@@ -4,5 +4,4 @@ group:
   group_id: ""  # id группы
   group_token: ""  # Токен группы
 youtube:
-  domain: "https://www.googleapis.com/youtube/v3"
-  api_key: ""  # Ваш ключ для доступа к YouTube API
+  api_keys: ""  # Ключи для доступа к YouTube API, через запятую

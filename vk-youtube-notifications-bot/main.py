@@ -1,38 +1,97 @@
 # -*- coding: utf-8 -*-
 import json
 import time
+from datetime import datetime
 from threading import Thread
 from pathlib import Path
 
 import requests
+import pymysql
 import vk_api
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
-from vk_api import VkUpload
 from vk_api.utils import get_random_id
 from fuzzywuzzy import fuzz
 import yaml
 
-from functions import write_json, console_log
-
+from functions import console_log, get_next
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR.joinpath("config.yaml")
-
 
 with open(CONFIG_PATH) as ymlFile:
     config = yaml.load(ymlFile.read(), Loader=yaml.Loader)
 
 
-class YouTubeParser(object):
-    def __init__(self, domain, api_key):
-        self.domain = domain
-        self.api_key = api_key
+def reconnect():
+    """Подключаемся к базе данных"""
+    global db, mycursor
 
-    def _get_channel_info(self, title: str):
+    try:
+        db.close()
+        db = pymysql.connect(
+            host="",
+            user="",
+            passwd="",
+            db=""
+        )
+        mycursor = db.cursor()
+
+        console_log("Переподключаемся к базе данных")
+
+    except:
+        """Если подключение первое"""
+        db = pymysql.connect(
+            host="",
+            user="",
+            passwd="",
+            db=""
+        )
+        mycursor = db.cursor()
+
+        console_log("Подключаемся к базе данных")
+
+def connection():
+    """Переподключаемся к базе данных каждые 5 минут"""
+    while True:
+        reconnect()
+        time.sleep(300)
+
+def create_tables():
+    """Создаём таблицы Chats и Channels, если их нет"""
+    # Создаём таблицу с чатами, если её нет
+    mycursor.execute("""
+    	CREATE TABLE IF NOT EXISTS Chats(
+    	id int PRIMARY KEY,
+    	added datetime NOT NULL
+    	)
+    """)
+
+    # Создаём таблицу с ютуб каналами, если её нет
+    mycursor.execute("""
+    	CREATE TABLE IF NOT EXISTS Channels(
+    	chat_id int,
+    	channel_id VARCHAR(50),
+    	channel_title VARCHAR(50),
+    	last_video_id VARCHAR(50),
+    	last_video_title VARCHAR(50)
+    	)
+    """)
+
+
+class YouTubeParser(object):
+    def __init__(self, api_keys):
+        self.api_keys = api_keys.split(",")
+        self.api_key = self.api_keys[0]
+
+    def get_channel_info(self, title: str):
         """Возвращает id ютуб канала"""
-        query = title.lower().replace(" ", "+")
-        url = f"{self.domain}/search?part=snippet&key={self.api_key}&q={query}"
-        response = requests.get(url)
+        url = "https://www.googleapis.com/youtube/v3/search?"
+        params = {
+            "part": "snippet",
+            "key": self.api_key,
+            "q": title.lower().replace(" ", "+")
+        }
+        response = requests.get(url=url, params=params)
         data = json.loads(response.text)
 
         if response.status_code == 200:
@@ -47,16 +106,22 @@ class YouTubeParser(object):
                         "id": channel_id,
                         "title": channel_title
                     }
-            return "Канал не найден"
+            return 404
         elif response.status_code == 403:
-            # Квота превышена :(
-            console_log("Квота превышена :(")
-            return "Квота превышена"
+            self.quota_exceeded()
+            return 403
 
-    def _get_last_video(self, channel_id: str) -> str:
+    def get_last_video(self, channel_id: str):
         """Вовращает id последнего видео ютуб канала"""
-        url = f"{self.domain}/search?key={self.api_key}&channelId={channel_id}&id&order=date"
-        response = requests.get(url)
+        url = "https://www.googleapis.com/youtube/v3/search?"
+        params = {
+            "key": self.api_key,
+            "channelId": channel_id,
+            "id": "",
+            "order": "date"
+        }
+        # url = f"{self.domain}/search?key={self.api_key}&channelId={channel_id}&id&order=date"
+        response = requests.get(url=url, params=params)
 
         if response.status_code == 200:
             # Запрос прошёл успешно
@@ -64,14 +129,18 @@ class YouTubeParser(object):
             last_video_id = data["items"][0]["id"]["videoId"]
             return last_video_id
         elif response.status_code == 403:
-            # Квота превышена :(
-            console_log("Квота превышена :(")
-            return "Квота превышена"
+            self.quota_exceeded()
+            return 403
 
-    def _get_video_title(self, video_id: str) -> str:
+    def get_video_title(self, video_id: str):
         """Вовращает название видео по его id"""
-        url = f"{self.domain}/videos?part=snippet&id={video_id}&key={self.api_key}"
-        response = requests.get(url)
+        url = "https://www.googleapis.com/youtube/v3/videos?"
+        params = {
+            "part": "snippet",
+            "id": video_id,
+            "key": self.api_key
+        }
+        response = requests.get(url=url, params=params)
 
         if response.status_code == 200:
             # Запрос прошёл успешно
@@ -79,9 +148,17 @@ class YouTubeParser(object):
             video_title = data["items"][0]["snippet"]["title"]
             return video_title
         elif response.status_code == 403:
-            # Квота превышена :(
-            console_log("Квота превышена :(")
-            return "Квота превышена"
+            self.quota_exceeded()
+            return 403
+
+    def quota_exceeded(self):
+        """
+        Квота превышена :(
+        Меняем ключ для работы с api
+        """
+        self.api_key = get_next(self.api_keys, self.api_key)
+        console_log("Квота превышена :(")
+        console_log("Меняем ключ для доступа к YouTube api")
 
 
 class Bot(object):
@@ -98,7 +175,7 @@ class Bot(object):
         vk_session = vk_api.VkApi(token=config["user"]["user_token"])
         self.upload = vk_api.VkUpload(vk_session)
 
-    def _upload_video(self, video_url: str, video_title: str):
+    def upload_video(self, video_url: str, video_title: str):
         response = self.upload.video(
             link=video_url,
             group_id=config["group"]["group_id"],
@@ -107,98 +184,115 @@ class Bot(object):
         attachment = "video{}_{}".format(response["owner_id"], response["video_id"])
         return attachment
 
-    def _add_chat(self, chat_id: int):
-        with open("chats.json", encoding="utf-8") as file:
-            data = json.load(file)
+    def add_chat(self, chat_id: int):
+        """Записываем в базу данных id новой беседы"""
+        try:
+            console_log(f"Бот добавлен в беседу {chat_id}")
+            mycursor.execute("INSERT INTO Chats (id, added) VALUES (%s, %s)", (chat_id, datetime.now()))
+            db.commit()
+        except Exception as e:
+            console_log("Что-то пошло не так")
+            print(e)
 
-        data["chats"].update({
-            chat_id: {
-                "channels": []
-            }
-        })
-
-        with open("chats.json", "w", encoding="utf-8") as data_file:
-            json.dump(data, data_file, indent=2)
-
-    def _add_channel(self, chat_id: int, channel_title: str):
+    def add_channel(self, chat_id: int, channel_title: str):
         """Добавляет ютуб канал в подписки беседы"""
-        channel_info = youtube._get_channel_info(channel_title)
+        channel_info = youtube.get_channel_info(channel_title)
 
-        if channel_info == "Канал не найден":
+        if channel_info == 404:
             message = "Канал с таким названием не найден"
-        elif channel_info == "Квота превышена":
+        elif channel_info == 403:
             message = "Что-то пошло не так. Без паники! Всем оставаться на своих местах!"
         else:
-            with open("chats.json", encoding="utf-8") as file:
-                data = json.load(file)
-
-            # Получаем информацию о ютуб канале и о подписках беседы
+            # Получаем id ютуб канала
             channel_id = channel_info["id"]
-            channel_title = channel_info["title"]
-            subscriptions = data["chats"][str(chat_id)]["channels"]
 
-            # Если беседа подписана на ютуб канал
-            if channel_id in [channel["id"] for channel in subscriptions]:
-                message = f"Вы уже подписаны на канал {channel_title}"
+            # Выбираем из базы данных все ютуб каналы, на которые подписана беседа
+            mycursor.execute("SELECT * FROM Channels where chat_id = %s", (chat_id))
+
+            # Составляем список из id ютуб каналов, на которые подписана беседа
+            channel_ids = [channel[1] for channel in mycursor.fetchall()]
+
+            # Если беседа уже подписана на этот ютуб канал
+            if channel_id in channel_ids:
+                message = f"Вы уже подписаны на этот канал"
             else:
                 # Максимальное число подписок - 3
-                if len(subscriptions) == 3:
+                if len(channel_ids) == 3:
                     message = f"Вы подписались на максимальное количество каналов. " \
-                              f"Отпишитесь от другого канала, чтобы подписаться на канал {channel_title}"
+                              f"Отпишитесь от другого канала, чтобы подписаться на этот канал."
 
                 else:
-                    last_video_id = youtube._get_last_video(channel_id)
-                    last_video_title = youtube._get_video_title(last_video_id)
+                    # Получаем информацию о ютуб канале
+                    channel_title = channel_info["title"]
+                    last_video_id = youtube.get_last_video(channel_id)
+                    last_video_title = youtube.get_video_title(last_video_id)
 
-                    data["chats"][str(chat_id)]["channels"].append({
-                        "id": channel_id,
-                        "title": channel_title,
-                        "last_video_id": last_video_id,
-                        "last_video_title": last_video_title
-                    })
+                    # Добавляем ютуб канал в подписки беседы
+                    mycursor.execute("""
+                    INSERT INTO Channels (chat_id, channel_id, channel_title, last_video_id, last_video_title) 
+                    VALUES (%s, %s, %s, %s, %s)
+                    """, (chat_id, channel_id, channel_title, last_video_id, last_video_title))
+
+                    db.commit()
 
                     message = f"✅Вы подписались на канал {channel_title}"
                     console_log(f"Беседа {chat_id} подписалась на канал {channel_title}")
 
-                    with open("chats.json", "w", encoding="utf-8") as data_file:
-                        json.dump(data, data_file, indent=2)
-
         self.bot.messages.send(
             chat_id=chat_id,
             message=message,
             random_id=get_random_id()
         )
 
-    def _remove_channel(self, chat_id: int, channel_title: str):
-        with open("chats.json", encoding="utf-8") as file:
-            data = json.load(file)
-
-        channel_info = youtube._get_channel_info(channel_title)
-        if channel_info == "Канал не найден":
+    def remove_channel(self, chat_id: int, channel_title: str):
+        channel_info = youtube.get_channel_info(channel_title)
+        if channel_info == 404:
             message = "Канал с таким названием не найден"
-        elif channel_info == "Квота превышена":
+        elif channel_info == 403:
             message = "Что-то пошло не так. Без паники! Всем оставаться на своих местах!"
         else:
-            # Получаем информацию о ютуб канале и о подписках беседы
+            # Получаем id ютуб канала
             channel_id = channel_info["id"]
-            channel_title = channel_info["title"]
-            subscriptions = data["chats"][str(chat_id)]["channels"]
+
+            # Получаем id всех ютуб каналов, на которые подписана беседа
+            mycursor.execute("SELECT * FROM Channels where chat_id = %s", (chat_id))
+            channel_ids = [channel[1] for channel in mycursor.fetchall()]
 
             # Если беседа не подписана на ютуб канал
-            if channel_id not in [channel["id"] for channel in subscriptions]:
-                message = "Вы не можете отписаться от канала, на который не подписаны"
+            if channel_id not in channel_ids:
+                message = "Как ты собрался отписаться от канала, на который не подписан? Петух"
             else:
-                # Ищем ютуб канал среди подписок беседы и удаляем его
-                for channel in subscriptions:
-                    if channel["id"] == channel_id:
-                        data["chats"][str(chat_id)]["channels"].remove(channel)
-                        break
+                # Удаляем ютуб канал
+                mycursor.execute("DELETE FROM Channels WHERE channel_id = %s", channel_id)
+
+                db.commit()
 
                 message = f"❌Вы отписались от канала {channel_title}"
                 console_log(f"Беседа {chat_id} отписалась от канала {channel_title}")
 
-                with open("chats.json", "w", encoding="utf-8") as file:
-                    json.dump(data, file, indent=2)
+        self.bot.messages.send(
+            chat_id=chat_id,
+            message=message,
+            random_id=get_random_id()
+        )
+
+    def remove_all_channels(self, chat_id: int):
+        """Удаляет все ютуб каналы, на которые подписана беседа"""
+        # Получаем id всех ютуб каналов, на которые подписана беседа
+        mycursor.execute("SELECT channel_id FROM Channels WHERE chat_id = %s", chat_id)
+        channel_ids = [channel[0] for channel in mycursor.fetchall()]
+
+        if len(channel_ids) == 0:
+            message = "От чего ты отписываться собрался? Петух"
+        else:
+
+            # Удаляем все ютуб каналы, на которые подписана беседа
+            mycursor.execute("DELETE FROM Channels WHERE chat_id = %s", chat_id)
+
+            db.commit()
+
+            message = "Вы отписались от всех каналов"
+            console_log(f"Беседа {chat_id} отписалась от всех каналов")
 
         self.bot.messages.send(
             chat_id=chat_id,
@@ -206,22 +300,19 @@ class Bot(object):
             random_id=get_random_id()
         )
 
-    def _remove_all_channels(self, chat_id: str):
-        # ToDo: сделать
-        pass
+    def show_subscriptions(self, chat_id: int):
+        """Отправляет в беседу список ютуб каналов, на которые подписана беседа"""
 
-    def _show_subscriptions(self, chat_id: str):
-        with open("chats.json", encoding="utf-8") as file:
-            data = json.load(file)
+        # Составляем список из всех ютуб каналов, на которые подписана беседа
+        mycursor.execute("SELECT * FROM Channels where chat_id = %s", (chat_id))
+        channels = [channel for channel in mycursor.fetchall()]
 
-        subscriptions = data["chats"][str(chat_id)]["channels"]
-
-        if len(subscriptions) == 0:
+        if len(channels) == 0:
             message = "У этой беседы нет подписок"
         else:
-            message = f"{len(subscriptions)}/3 подписок"
-            for i, channel in enumerate(subscriptions, start=1):
-                message += f"\n{i}. {channel['title']}"
+            message = f"{len(channels)}/3 подписок"
+            for i, channel in enumerate(channels, start=1):
+                message += f"\n{i}. {channel[2]}"
 
         self.bot.messages.send(
             chat_id=chat_id,
@@ -229,12 +320,25 @@ class Bot(object):
             random_id=get_random_id()
         )
 
-    def _get_help(self, chat_id: int):
-        message = "Список команд:\n" \
-                  "!подписаться <название канала>\n" \
-                  "!отписаться <название канала>\n" \
-                  "!подписки\n" \
-                  "!помощь"
+    def show_video(self, chat_id: int, video_title: str):
+        """Отправляет в беседу найденное видео"""
+        # ToDo сделать
+        pass
+        # with open("chats.json", encoding="utf-8") as f:
+        #     data = json.load(f)
+        # first_channel = data["chats"]["1"]["channels"][0]
+        # self._notification(chat_id, first_channel)
+
+    def get_help(self, chat_id: int):
+        message = """
+        Список команд:
+        !подписаться <название канала>
+        !отписаться <название канала>
+        !отписаться - отписаться от всех каналов
+        !видео <название видео>
+        !подписки
+        !помощь  
+        """
 
         self.bot.messages.send(
             chat_id=chat_id,
@@ -242,15 +346,18 @@ class Bot(object):
             random_id=get_random_id()
         )
 
-    def _notification(self, chat_id: int, channel: dict):
-        channel_id = channel["id"]
-        channel_title = channel["title"]
+    def notification(self, chat_id: int, channel: dict):
+        """Отправляет в беседу уведомление о выходе нового видео"""
+        channel_id = channel["channel_id"]
+        channel_title = channel["channel_title"]
         video_id = channel["last_video_id"]
-        video_title = youtube._get_video_title(video_id)
+        video_title = channel["last_video_title"]
         video_url = f"https://www.youtube.com/watch?v={video_id}&ab_channel={channel_id}"
         message = f"На канале {channel_title} вышло новое видео!"
+
         console_log(message)
         console_log(video_title)
+
         self.bot.messages.send(
             chat_id=chat_id,
             message=message,
@@ -260,7 +367,7 @@ class Bot(object):
         self.bot.messages.send(
             chat_id=chat_id,
             message="",
-            attachment=self._upload_video(video_url, video_title),
+            attachment=self.upload_video(video_url, video_title),
             random_id=get_random_id()
         )
 
@@ -268,32 +375,50 @@ class Bot(object):
         while True:
             console_log("Проверка всех чатов")
 
-            with open("chats.json", encoding="utf-8") as file:
-                data = json.load(file)
+            # Получаем id всех чатов, в которых состоит бот
+            mycursor.execute("SELECT id FROM Chats")
+            chat_ids = [chat[0] for chat in mycursor.fetchall()]
 
-            for chat_id, channels in data["chats"].items():
-                channels = channels["channels"]
-                for i, channel in enumerate(channels):
-                    channel_id = channel["id"]
-                    archive_last_video_id = channel["last_video_id"]
-                    last_video_id = youtube._get_last_video(channel_id)
-                    if last_video_id == "Квота превышена":
-                        console_log("Квота превышена :(")
-                    else:
-                        # Если на канале вышло новое видео
-                        if archive_last_video_id != last_video_id:
-                            # Обновляем id последнего видео у канала
-                            data["chats"][str(chat_id)]["channels"][i]["last_video_id"] = last_video_id
+            for chat_id in chat_ids:
+                # Составляем список из всех ютуб каналов, на которые подписана беседа
+                mycursor.execute("SELECT * FROM Channels WHERE chat_id = %s", chat_id)
+                channels = [channel for channel in mycursor.fetchall()]
 
-                            # Отправляем уведомление в беседу
-                            self._notification(chat_id, channel)
+                for channel in channels:
 
-                with open("chats.json", "w", encoding="utf-8") as data_file:
-                    json.dump(data, data_file, indent=2)
+                    channel_id = channel[1]
+                    channel_title = channel[2]
+                    last_video_id = youtube.get_last_video(channel_id)
+                    # Если на канале вышло новое видео
+                    if last_video_id != 403 and last_video_id != channel[3]:
+                        print(last_video_id)
+                        print(youtube.get_last_video(channel_id))
 
-            time.sleep(1800)  # Следующая проверка через 30 минут
+                        # Обновляем id последнего видео у ютуб канала
+                        last_video_id = youtube.get_last_video(channel_id)
+                        last_video_title = youtube.get_video_title(last_video_id)
+                        mycursor.execute("""
+                        UPDATE Channels 
+                        SET last_video_id = %s, last_video_title = %s 
+                        WHERE chat_id = %s AND channel_id = %s
+                        """, (last_video_id, last_video_title, chat_id, channel_id))
+
+                        db.commit()
+
+                        channel = {
+                            "channel_id": channel_id,
+                            "channel_title": channel_title,
+                            "last_video_id": last_video_id,
+                            "last_video_title": last_video_title
+                        }
+
+                        # Отправляем уведомление в беседу
+                        self.notification(chat_id, channel)
+
+            time.sleep(3600)  # Следующая проверка через час
 
     def listen(self):
+        create_tables()  # Создаём таблицы в базе данных
         console_log("Бот запущен")
         while True:
             try:
@@ -303,38 +428,40 @@ class Bot(object):
                         received_message = event.message["text"].lower()
                         chat_id = event.chat_id
 
-                        with open("chats.json", encoding="utf-8") as f:
-                            data = json.load(f)
-
-                        chat_ids = [int(chat_id) for chat_id in data["chats"].keys()]
+                        # Если сообщение появилось из беседы и этой беседы нет в базе данных, то довабляем её id
+                        mycursor.execute("SELECT id FROM Chats")
+                        result = mycursor.fetchall()
+                        chat_ids = [chat_id[0] for chat_id in result]
                         if chat_id not in chat_ids:
-                            console_log(f"Бот добавлен в беседу {chat_id}")
-                            self._add_chat(chat_id)
+                            self.add_chat(chat_id)
 
                         # Если бота пригласили в новую беседу
                         if "action" in event.message:
                             if event.message["action"]["type"] == "chat_invite_user":
                                 if event.message["action"]["member_id"] == -int(config["group"]["group_id"]):
-                                    console_log(f"Бот добавлен в беседу {chat_id}")
-                                    self._add_chat(chat_id)
+                                    self.add_chat(chat_id)
 
-                        if fuzz.ratio(received_message[:12], "!подписаться") > 75:
+                        # Пропускаем невалидные команды
+                        if received_message in ["!подписаться", "!видео"]:
+                            continue
+
+                        if received_message[:12] == "!подписаться":
                             channel_title = received_message.split(" ")[1]
-                            self._add_channel(chat_id, channel_title)
-                        elif fuzz.ratio(received_message[:11], "!отписаться") > 75:
+                            self.add_channel(chat_id, channel_title)
+                        elif received_message == "!отписаться":
+                            self.remove_all_channels(chat_id)
+                        elif fuzz.ratio(received_message[:11], "!отписаться") > 85:
                             channel_title = received_message.split(" ")[1]
-                            self._remove_channel(chat_id, channel_title)
+                            self.remove_channel(chat_id, channel_title)
                         elif fuzz.ratio(received_message, "!подписки") > 75:
-                            self._show_subscriptions(chat_id)
+                            self.show_subscriptions(chat_id)
                         elif fuzz.ratio(received_message, "!видео") > 75:
-                            with open("chats.json", encoding="utf-8") as f:
-                                data = json.load(f)
-
-                            first_channel = data["chats"]["1"]["channels"][0]
-                            self._notification(chat_id, first_channel)
+                            video_title = received_message.split(" ")[1]
+                            self.show_video(chat_id, video_title)
                         elif fuzz.ratio(received_message, "!помощь") > 75:
-                            self._get_help(chat_id)
+                            self.get_help(chat_id)
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+                # Перезагрузка серверов ВКонтакте
                 print(e)
                 console_log("Перезапуск бота")
 
@@ -342,15 +469,17 @@ class Bot(object):
 if __name__ == "__main__":
     # Авторизируемся для работы с YouTube API
     youtube = YouTubeParser(
-        domain=config["youtube"]["domain"],
-        api_key=config["youtube"]["api_key"]
+        api_keys=config["youtube"]["api_keys"]
     )
 
     vkbot = Bot()
     vkbot.auth()
 
-    p1 = Thread(target = vkbot.check_chats)
-    p1.start()  # Запускаем мониторинг ютуб каналов
+    p1 = Thread(target=connection)
+    p1.start()  # Подключаемся к базе данных
     time.sleep(0.1)
-    p2 = Thread(target = vkbot.listen)
+    p2 = Thread(target=vkbot.listen)
     p2.start()  # Запускаем мониторинг бесед
+    time.sleep(0.1)
+    p1 = Thread(target=vkbot.check_chats)
+    p1.start()  # Запускаем мониторинг ютуб каналов
