@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import time
+import pandas as pd
 from datetime import datetime
 from threading import Thread
 from pathlib import Path
@@ -8,16 +9,18 @@ from pathlib import Path
 import requests
 import pymysql
 import vk_api
+import yaml
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 from vk_api.utils import get_random_id
 from fuzzywuzzy import fuzz
-import yaml
-
+from pytils import numeral
 from functions import console_log, get_next
+
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR.joinpath("config.yaml")
 
+# Считываем данные с конфиг файла
 with open(CONFIG_PATH) as ymlFile:
     config = yaml.load(ymlFile.read(), Loader=yaml.Loader)
 
@@ -29,10 +32,10 @@ def reconnect():
     try:
         db.close()
         db = pymysql.connect(
-            host="",
-            user="",
-            passwd="",
-            db=""
+            host=config["database"]["host"],
+            user=config["database"]["user"],
+            passwd=config["database"]["passwd"],
+            db=config["database"]["db"]
         )
         mycursor = db.cursor()
 
@@ -41,10 +44,10 @@ def reconnect():
     except:
         """Если подключение первое"""
         db = pymysql.connect(
-            host="",
-            user="",
-            passwd="",
-            db=""
+            host=config["database"]["host"],
+            user=config["database"]["user"],
+            passwd=config["database"]["passwd"],
+            db=config["database"]["db"]
         )
         mycursor = db.cursor()
 
@@ -76,6 +79,71 @@ def create_tables():
     	last_video_title VARCHAR(50)
     	)
     """)
+
+
+class Utils:
+    def auth(self):
+        # Авторизируем бота
+        authorize = vk_api.VkApi(token=config["group"]["group_token"])
+        self.bot = authorize.get_api()
+
+        # Авторизируем пользователя
+        vk_session = vk_api.VkApi(token=config["user"]["user_token"])
+        self.vk = vk_session.get_api()
+
+    def get_conversations_count(self):
+        """Получаем количество бесед, в которых работает бот"""
+        chat_id = 1
+        while True:
+            try:
+                chat_id += 1
+                # Пытаемся получить информацию о беседе
+                self.bot.messages.getConversationsById(
+                    peer_ids=2000000000 + chat_id,
+                    group_id=config["group"]["group_id"]
+                )
+            except Exception as e:
+                # Если бот не состоит в беседе, то останавливает цикл
+                if(e.code == 927):
+                    return chat_id - 1
+
+    def set_status(self):
+        """Меняет статус у группы и у пользователя"""
+        conversations_count = self.get_conversations_count()
+        message = "🔥Ютуб бот работает в {}!🔥".format(
+            numeral.get_plural(conversations_count, "беседе, беседах, беседах")
+        )
+
+        # Меняем статус в группе
+        self.vk.status.set(
+            text=message,
+            group_id=config["group"]["group_id"]
+        )
+
+        # Меняем статус пользователя
+        self.vk.status.set(
+            text=message
+        )
+
+    def show_chats(self):
+        """Выводит таблицу у чатах"""
+        frame = pd.read_sql("SELECT * FROM Chats", db)
+
+        pd.set_option('display.expand_frame_repr', False)
+
+        frame = frame.to_string(index=False)
+
+        print(frame)
+
+    def show_channels(self):
+        """Выводит таблицу о ютуб каналах"""
+        frame = pd.read_sql("SELECT * FROM Channels", db)
+
+        pd.set_option('display.expand_frame_repr', False)
+
+        frame = frame.to_string(index=False)
+
+        print(frame)
 
 
 class YouTubeParser(object):
@@ -161,7 +229,7 @@ class YouTubeParser(object):
         console_log("Меняем ключ для доступа к YouTube api")
 
 
-class Bot(object):
+class Bot:
     def auth(self):
         # Авторизируем бота
         authorize = vk_api.VkApi(token=config["group"]["group_token"])
@@ -179,7 +247,8 @@ class Bot(object):
         response = self.upload.video(
             link=video_url,
             group_id=config["group"]["group_id"],
-            name=video_title
+            name=video_title,
+            is_private=True
         )
         attachment = "video{}_{}".format(response["owner_id"], response["video_id"])
         return attachment
@@ -391,9 +460,6 @@ class Bot(object):
                     last_video_id = youtube.get_last_video(channel_id)
                     # Если на канале вышло новое видео
                     if last_video_id != 403 and last_video_id != channel[3]:
-                        print(last_video_id)
-                        print(youtube.get_last_video(channel_id))
-
                         # Обновляем id последнего видео у ютуб канала
                         last_video_id = youtube.get_last_video(channel_id)
                         last_video_title = youtube.get_video_title(last_video_id)
@@ -418,7 +484,12 @@ class Bot(object):
             time.sleep(3600)  # Следующая проверка через час
 
     def listen(self):
-        create_tables()  # Создаём таблицы в базе данных
+        """
+        Создаём таблицы в базе данных(если таблицы уже созданы, то
+        функцию create_tables можно закомментировать).
+        Начинаем прослушку всех бесед.
+        """
+        # create_tables()  # Создаём таблицы в базе данных
         console_log("Бот запущен")
         while True:
             try:
@@ -446,7 +517,7 @@ class Bot(object):
                             continue
 
                         if received_message[:12] == "!подписаться":
-                            channel_title = received_message.split(" ")[1]
+                            channel_title = received_message.split(" ")[1].replace(" ", "")
                             self.add_channel(chat_id, channel_title)
                         elif received_message == "!отписаться":
                             self.remove_all_channels(chat_id)
