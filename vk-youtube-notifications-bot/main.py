@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime
 from threading import Thread
 from pathlib import Path
+from operator import itemgetter
 
 import requests
 import pymysql
@@ -91,6 +92,10 @@ class Utils:
         vk_session = vk_api.VkApi(token=config["user"]["user_token"])
         self.vk = vk_session.get_api()
 
+        # Авторизируем приложение
+        vk_session = vk_api.VkApi(token=config["app"]["app_token"])
+        self.app = vk_session.get_api()
+
     def get_conversations_count(self):
         """Получаем количество бесед, в которых работает бот"""
         chat_id = 1
@@ -144,6 +149,73 @@ class Utils:
         frame = frame.to_string(index=False)
 
         print(frame)
+
+    def get_top_channels(self) -> list:
+        """Вовращает пять самых популярных ютуб каналов"""
+        channels = dict()
+        mycursor.execute("SELECT * FROM Channels")
+        for channel in mycursor.fetchall():
+            channel_title = channel[2]
+            if channel_title not in channels.keys():
+                channels[channel_title] = 1
+            else:
+                channels[channel_title] += 1
+
+        channels = sorted(channels.items(), key=itemgetter(1), reverse=True)[:5]
+        return channels
+
+    def widget(self):
+        code = {
+            "title": "Лучшие подписчики!",
+            "title_url": "ссылка на мою группу",
+            "head": [
+                {
+                    "text": "Имя"
+                },
+                {
+                    "text": "Коллиество",
+                    "align": "right"
+                }
+            ],
+            "body": [
+                [
+                    {
+                        "icon_id": "id242306128",
+                        "text": "Александр Бульбенков",
+                        "url": "vk.com/id242306128"
+                    },
+                    {
+                        "text": "Содержимое 1x2"
+                    }
+                ],
+                [
+                    {
+                        "icon_id": "id242306128",
+                        "text": "Александр Бульбенков",
+                        "url": "vk.com/id242306128"
+                    },
+                    {
+                        "text": "Содержимое 1x2"
+                    }
+                ],
+                [
+                    {
+                        "icon_id": "id242306128",
+                        "text": "Александр Бульбенков",
+                        "url": "vk.com/id242306128"
+                    },
+                    {
+                        "text": "Содержимое 1x2"
+                    }
+                ]
+            ],
+            "more": "Подробнее",
+            "more_url": "https://vk.com/write-АЙДИ_ГРУППЫ"
+        }
+        self.app.appWidgets.update(
+            code=code,
+            type="table"
+        )
 
 
 class YouTubeParser(object):
@@ -243,6 +315,9 @@ class Bot:
         vk_session = vk_api.VkApi(token=config["user"]["user_token"])
         self.upload = vk_api.VkUpload(vk_session)
 
+        # Подключаем утилиты
+        self.utils = Utils()
+
     def upload_video(self, video_url: str, video_title: str):
         response = self.upload.video(
             link=video_url,
@@ -331,8 +406,11 @@ class Bot:
             if channel_id not in channel_ids:
                 message = "Как ты собрался отписаться от канала, на который не подписан? Петух"
             else:
-                # Удаляем ютуб канал
-                mycursor.execute("DELETE FROM Channels WHERE channel_id = %s", channel_id)
+                # Удаляем ютуб канал из подписок беседы
+                mycursor.execute("""
+                DELETE FROM Channels 
+                WHERE chat_id = %s AND channel_id = %s
+                """, (chat_id, channel_id))
 
                 db.commit()
 
@@ -430,13 +508,22 @@ class Bot:
         self.bot.messages.send(
             chat_id=chat_id,
             message=message,
+            attachment=self.upload_video(video_url, video_title),
             random_id=get_random_id()
         )
 
+    def show_top_channels(self, chat_id: int):
+        channels = self.utils.get_top_channels()
+
+        message = "🔥Топ каналов🔥"
+        for i, channel in enumerate(channels, start=1):
+            channel_title = channel[0]
+            subscriptions_count = channel[1]
+            message += f"\n{i}. {channel_title} - {subscriptions_count}"
+
         self.bot.messages.send(
             chat_id=chat_id,
-            message="",
-            attachment=self.upload_video(video_url, video_title),
+            message=message,
             random_id=get_random_id()
         )
 
@@ -531,6 +618,8 @@ class Bot:
                             self.show_video(chat_id, video_title)
                         elif fuzz.ratio(received_message, "!помощь") > 75:
                             self.get_help(chat_id)
+                        elif fuzz.ratio(received_message, "!топ") > 75:
+                            self.show_top_channels(chat_id)
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
                 # Перезагрузка серверов ВКонтакте
                 print(e)
