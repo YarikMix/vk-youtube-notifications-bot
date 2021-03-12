@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 import json
+import io
 import time
 import pandas as pd
+from PIL import Image
 from datetime import datetime
 from threading import Thread
 from pathlib import Path
@@ -16,7 +18,6 @@ from vk_api.utils import get_random_id
 from fuzzywuzzy import fuzz
 from pytils import numeral
 from functions import console_log, get_next
-
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR.joinpath("config.yaml")
@@ -55,10 +56,10 @@ def reconnect():
         console_log("Подключаемся к базе данных")
 
 def connection():
-    """Переподключаемся к базе данных каждые 5 минут"""
+    """Переподключаемся к базе данных каждые 3 минуты"""
     while True:
         reconnect()
-        time.sleep(300)
+        time.sleep(180)
 
 def create_tables():
     """Создаём таблицы Chats и Channels, если их нет"""
@@ -69,6 +70,7 @@ def create_tables():
     	added datetime NOT NULL
     	)
     """)
+    console_log("Таблица Chats создана")
 
     # Создаём таблицу с ютуб каналами, если её нет
     mycursor.execute("""
@@ -76,10 +78,12 @@ def create_tables():
     	chat_id int,
     	channel_id VARCHAR(50),
     	channel_title VARCHAR(50),
+    	channel_photo_url VARCHAR(125),
     	last_video_id VARCHAR(50),
-    	last_video_title VARCHAR(50)
+    	last_video_title VARCHAR(100)
     	)
     """)
+    console_log("Таблица Channels создана")
 
 
 class Utils:
@@ -87,14 +91,15 @@ class Utils:
         # Авторизируем бота
         authorize = vk_api.VkApi(token=config["group"]["group_token"])
         self.bot = authorize.get_api()
+        self.upload = vk_api.VkUpload(authorize)
 
         # Авторизируем пользователя
         vk_session = vk_api.VkApi(token=config["user"]["user_token"])
         self.vk = vk_session.get_api()
 
         # Авторизируем приложение
-        vk_session = vk_api.VkApi(token=config["app"]["app_token"])
-        self.app = vk_session.get_api()
+        vk_session = vk_api.VkApi(token=config["widgets"]["widgets_token"])
+        self.widgets = vk_session.get_api()
 
     def get_conversations_count(self):
         """Получаем количество бесед, в которых работает бот"""
@@ -109,8 +114,31 @@ class Utils:
                 )
             except Exception as e:
                 # Если бот не состоит в беседе, то останавливает цикл
-                if(e.code == 927):
+                if (e.code == 927):
                     return chat_id - 1
+
+    def get_top_channels(self) -> list:
+        """Вовращает пять самых популярных ютуб каналов"""
+        channels = dict()
+        mycursor.execute("SELECT * FROM Channels")
+
+        for channel in mycursor.fetchall():
+            channel_id = channel[1]
+            channel_title = channel[2]
+            channel_photo_url = channel[3]
+            if channel_id not in channels.keys():
+                channels[channel_id] = {
+                    "title": channel_title,
+                    "photo_url": channel_photo_url,
+                    "subscribers_count": 1
+                }
+            else:
+                channels[channel_id]["subscribers_count"] += 1
+
+        # Сортируем каналы по убыванию количества подписок
+        channels = sorted(channels.items(), key=lambda x: x[1]["subscribers_count"], reverse=True)
+
+        return channels
 
     def set_status(self):
         """Меняет статус у группы и у пользователя"""
@@ -130,8 +158,68 @@ class Utils:
             text=message
         )
 
+    def set_widget(self):
+        """Обновляет таблицу самых популярных ютуб каналов"""
+        channels = self.get_top_channels()
+
+        code = f"""
+            var widget = {{
+            "title": "Топ каналов",
+            "title_counter": {len(channels)},
+            "head": [{{
+                "text": "Канал"
+            }}, {{
+                "text": "Подписчиков",
+                "align": "center"
+            }}],
+            "body": [
+        """
+
+        if len(channels) != 0:
+            # Если подписки есть
+            for i, channel in enumerate(channels, start=1):
+                if i > 5:
+                    break
+                channel_title = channel[1]["title"]
+                channel_photo_url = channel[1]["photo_url"]
+                channel_subscribers_count = channel[1]["subscribers_count"]
+
+                # icon_id = self.get_icon_by_url(channel_photo_url)
+
+                code += f"""
+                [{{
+                    "text": "{channel_title}",
+                    "url": "https://vk.com/ytnotifications"
+                }},
+                {{
+                    "text": "{channel_subscribers_count}"
+                }}],
+                """
+        else:
+            # Если подписок нет
+            code += """
+            [{
+                "text": "Подписок нет"
+            },
+            {
+                "text": ""
+            }],
+            """
+
+        code += """
+            ]
+        };
+        return widget;
+        """
+
+        # Обновляем виджет группы
+        self.widgets.appWidgets.update(
+            code=code,
+            type="table"
+        )
+
     def show_chats(self):
-        """Выводит таблицу у чатах"""
+        """Выводит таблицу Chats"""
         frame = pd.read_sql("SELECT * FROM Chats", db)
 
         pd.set_option('display.expand_frame_repr', False)
@@ -141,7 +229,7 @@ class Utils:
         print(frame)
 
     def show_channels(self):
-        """Выводит таблицу о ютуб каналах"""
+        """Выводит таблицу Channels"""
         frame = pd.read_sql("SELECT * FROM Channels", db)
 
         pd.set_option('display.expand_frame_repr', False)
@@ -150,72 +238,40 @@ class Utils:
 
         print(frame)
 
-    def get_top_channels(self) -> list:
-        """Вовращает пять самых популярных ютуб каналов"""
-        channels = dict()
-        mycursor.execute("SELECT * FROM Channels")
-        for channel in mycursor.fetchall():
-            channel_title = channel[2]
-            if channel_title not in channels.keys():
-                channels[channel_title] = 1
-            else:
-                channels[channel_title] += 1
-
-        channels = sorted(channels.items(), key=itemgetter(1), reverse=True)[:5]
-        return channels
+    def status(self):
+        """Меняет статус каждый день"""
+        while True:
+            utils.set_status()
+            console_log("Статус обновлён")
+            time.sleep(86400)
 
     def widget(self):
-        code = {
-            "title": "Лучшие подписчики!",
-            "title_url": "ссылка на мою группу",
-            "head": [
-                {
-                    "text": "Имя"
-                },
-                {
-                    "text": "Коллиество",
-                    "align": "right"
-                }
-            ],
-            "body": [
-                [
-                    {
-                        "icon_id": "id242306128",
-                        "text": "Александр Бульбенков",
-                        "url": "vk.com/id242306128"
-                    },
-                    {
-                        "text": "Содержимое 1x2"
-                    }
-                ],
-                [
-                    {
-                        "icon_id": "id242306128",
-                        "text": "Александр Бульбенков",
-                        "url": "vk.com/id242306128"
-                    },
-                    {
-                        "text": "Содержимое 1x2"
-                    }
-                ],
-                [
-                    {
-                        "icon_id": "id242306128",
-                        "text": "Александр Бульбенков",
-                        "url": "vk.com/id242306128"
-                    },
-                    {
-                        "text": "Содержимое 1x2"
-                    }
-                ]
-            ],
-            "more": "Подробнее",
-            "more_url": "https://vk.com/write-АЙДИ_ГРУППЫ"
-        }
-        self.app.appWidgets.update(
-            code=code,
-            type="table"
+        """Меняет виджет каждый день"""
+        while True:
+            utils.set_widget()
+            console_log("Виджет обновлён")
+            time.sleep(86400)
+
+    def get_icon_by_url(self, url: str) -> str:
+        r = requests.get(url)
+        # Скачиваем фотографию
+        image = io.BytesIO(r.content)
+        # Открываем фотографию
+        img = Image.open(image)
+        # Меняем разрешение фотографии
+        img = img.resize((150, 150), Image.ANTIALIAS)
+        # Сохраняем фото
+        buffer = io.BytesIO()
+        img.save(buffer, "png")
+        buffer.seek(0)
+
+        # Отправляем фото в беседу
+        response = self.upload.photo_group_widget(
+            photo=buffer,
+            image_type="50x50"
         )
+        attachment = f"id{response['id']}"
+        return attachment
 
 
 class YouTubeParser(object):
@@ -242,9 +298,12 @@ class YouTubeParser(object):
                 if kind == "youtube#channel":
                     channel_id = item["id"]["channelId"]
                     channel_title = item["snippet"]["title"]
+                    channel_photo_url = item["snippet"]["thumbnails"]["default"]["url"]
+
                     return {
                         "id": channel_id,
-                        "title": channel_title
+                        "title": channel_title,
+                        "photo_url": channel_photo_url
                     }
             return 404
         elif response.status_code == 403:
@@ -368,14 +427,15 @@ class Bot:
                 else:
                     # Получаем информацию о ютуб канале
                     channel_title = channel_info["title"]
+                    channel_photo_url = channel_info["photo_url"]
                     last_video_id = youtube.get_last_video(channel_id)
                     last_video_title = youtube.get_video_title(last_video_id)
 
                     # Добавляем ютуб канал в подписки беседы
                     mycursor.execute("""
-                    INSERT INTO Channels (chat_id, channel_id, channel_title, last_video_id, last_video_title) 
-                    VALUES (%s, %s, %s, %s, %s)
-                    """, (chat_id, channel_id, channel_title, last_video_id, last_video_title))
+                    INSERT INTO Channels (chat_id, channel_id, channel_title, channel_photo_url, last_video_id, last_video_title) 
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (chat_id, channel_id, channel_title, channel_photo_url, last_video_id, last_video_title))
 
                     db.commit()
 
@@ -517,9 +577,9 @@ class Bot:
 
         message = "🔥Топ каналов🔥"
         for i, channel in enumerate(channels, start=1):
-            channel_title = channel[0]
-            subscriptions_count = channel[1]
-            message += f"\n{i}. {channel_title} - {subscriptions_count}"
+            channel_title = channel[1]["title"]
+            channel_subscribers_count = channel[1]["subscribers_count"]
+            message += f"\n{i}. {channel_title} - {channel_subscribers_count}"
 
         self.bot.messages.send(
             chat_id=chat_id,
@@ -546,7 +606,7 @@ class Bot:
                     channel_title = channel[2]
                     last_video_id = youtube.get_last_video(channel_id)
                     # Если на канале вышло новое видео
-                    if last_video_id != 403 and last_video_id != channel[3]:
+                    if last_video_id != 403 and last_video_id != channel[4]:
                         # Обновляем id последнего видео у ютуб канала
                         last_video_id = youtube.get_last_video(channel_id)
                         last_video_title = youtube.get_video_title(last_video_id)
@@ -571,12 +631,7 @@ class Bot:
             time.sleep(3600)  # Следующая проверка через час
 
     def listen(self):
-        """
-        Создаём таблицы в базе данных(если таблицы уже созданы, то
-        функцию create_tables можно закомментировать).
-        Начинаем прослушку всех бесед.
-        """
-        # create_tables()  # Создаём таблицы в базе данных
+        """Начинаем прослушку всех бесед"""
         console_log("Бот запущен")
         while True:
             try:
@@ -608,7 +663,7 @@ class Bot:
                             self.add_channel(chat_id, channel_title)
                         elif received_message == "!отписаться":
                             self.remove_all_channels(chat_id)
-                        elif fuzz.ratio(received_message[:11], "!отписаться") > 85:
+                        elif received_message[:12] == "!отписаться ":
                             channel_title = received_message.split(" ")[1]
                             self.remove_channel(chat_id, channel_title)
                         elif fuzz.ratio(received_message, "!подписки") > 75:
@@ -632,14 +687,25 @@ if __name__ == "__main__":
         api_keys=config["youtube"]["api_keys"]
     )
 
+    utils = Utils()
+    utils.auth()
+
     vkbot = Bot()
     vkbot.auth()
 
     p1 = Thread(target=connection)
     p1.start()  # Подключаемся к базе данных
-    time.sleep(0.1)
+    time.sleep(0.5)
+    # create_tables()  # Создаём таблицы
+    time.sleep(0.5)
     p2 = Thread(target=vkbot.listen)
     p2.start()  # Запускаем мониторинг бесед
-    time.sleep(0.1)
-    p1 = Thread(target=vkbot.check_chats)
-    p1.start()  # Запускаем мониторинг ютуб каналов
+    time.sleep(0.5)
+    p3 = Thread(target=vkbot.check_chats)
+    p3.start()  # Запускаем мониторинг ютуб каналов
+    time.sleep(0.5)
+    p4 = Thread(target=utils.status)
+    p4.start()  # Меняем статус
+    time.sleep(0.5)
+    p5 = Thread(target=utils.widget)
+    p5.start()  # Обновляем виджет

@@ -8,7 +8,7 @@ user:
 group:
   group_id: ""  # id группы
   group_token: ""  # Токен группы
-app:
-  app_token: ""  # Токен приложения
+widgets:
+  widgets_token: ""  # Токен приложения для виджетов
 youtube:
   api_keys: ""  # Ключи для доступа к YouTube API, через запятую
